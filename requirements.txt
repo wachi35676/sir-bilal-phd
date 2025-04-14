@@ -1,0 +1,10 @@
+pandas 
+numpy 
+matplotlib 
+seaborn
+openpyxl
+scikit-learn
+torch
+nltk
+requests
+transformers

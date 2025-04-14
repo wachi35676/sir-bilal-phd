@@ -158,3 +158,24 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# --- Project Specific Ignores ---
+
+# Downloaded Embeddings
+/embeddings/
+
+# Saved Tokenizer
+/saved_tokenizer/
+
+# Saved Models and Components
+*.pt
+*.pkl
+
+# Generated Plots/Images
+*.png
+
+# Saved NumPy arrays
+*.npy
+
+# Data files (often large)
+*.xlsx
