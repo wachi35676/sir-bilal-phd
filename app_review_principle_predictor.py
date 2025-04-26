@@ -180,7 +180,10 @@ class ReviewVocabulary:
         
         # Initialize pre-trained embeddings matrix
         if use_pretrained:
-            self.pretrained_embeddings = load_glove_embeddings(embedding_dim)
+            # Check if embeddings file already exists
+            self.pretrained_embeddings = check_embeddings_exist(embedding_dim)
+            if not self.pretrained_embeddings:  # If not found locally, try downloading
+                self.pretrained_embeddings = load_glove_embeddings(embedding_dim)
         else:
             self.pretrained_embeddings = {}
     
@@ -238,6 +241,8 @@ class ReviewVocabulary:
                     found += 1
             
             print(f"Initialized {found}/{vocab_size} word vectors from pre-trained embeddings.")
+        else:
+            print(f"Using randomly initialized word vectors.")
     
     def get_embeddings(self):
         """Get the embeddings matrix as a tensor."""
@@ -259,6 +264,38 @@ class ReviewVocabulary:
     
     def __len__(self):
         return len(self.word2idx)
+
+def check_embeddings_exist(embedding_dim=200):
+    """
+    Check if GloVe embeddings already exist locally and load them if they do.
+    
+    Parameters:
+    embedding_dim (int): Dimensionality of word embeddings
+    
+    Returns:
+    dict: Dictionary of word embeddings or empty dict if not found
+    """
+    cache_dir = 'embeddings'
+    embedding_file = os.path.join(cache_dir, f'glove.6B.{embedding_dim}d.txt')
+    
+    if os.path.exists(embedding_file):
+        print(f"Found existing GloVe embeddings at {embedding_file}")
+        embeddings = {}
+        try:
+            with open(embedding_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    values = line.split()
+                    word = values[0]
+                    vector = np.array(values[1:], dtype='float32')
+                    embeddings[word] = vector
+            print(f"Loaded {len(embeddings)} word vectors from existing file.")
+            return embeddings
+        except Exception as e:
+            print(f"Error loading existing embeddings: {e}")
+            return {}
+    else:
+        print(f"No existing embeddings found at {embedding_file}")
+        return {}
 
 class ReviewDataset(Dataset):
     """Dataset class for app reviews"""
@@ -284,7 +321,7 @@ class ReviewDataset(Dataset):
             'labels_level3': torch.tensor(self.labels_level3[idx], dtype=torch.float)
         }
 
-def prepare_hierarchical_data(df, hierarchy, review_text_column, oversample_minority=True):
+def prepare_hierarchical_data(df, hierarchy, review_text_column, oversample_minority=True, use_pretrained=True):
     """
     Prepare the data for hierarchical classification with improved handling of imbalanced data.
     
@@ -293,6 +330,7 @@ def prepare_hierarchical_data(df, hierarchy, review_text_column, oversample_mino
     hierarchy (dict): Dictionary containing the hierarchical structure of principles
     review_text_column (str): Name of the column containing review text
     oversample_minority (bool): Whether to oversample minority classes
+    use_pretrained (bool): Whether to use pre-trained word embeddings
     
     Returns:
     tuple: Training, validation, and test data, plus vocabulary and label encoders
@@ -429,8 +467,8 @@ def prepare_hierarchical_data(df, hierarchy, review_text_column, oversample_mino
     print(f"Test set: {len(X_test)} samples")
     
     # Create vocabulary with pre-trained embeddings
-    print("Building vocabulary with pre-trained embeddings...")
-    vocab = ReviewVocabulary(max_size=15000, embedding_dim=200, use_pretrained=True)
+    print(f"Building vocabulary {'with pre-trained embeddings' if use_pretrained else 'without pre-trained embeddings'}...")
+    vocab = ReviewVocabulary(max_size=15000, embedding_dim=200, use_pretrained=use_pretrained)
     for text in X_train:
         vocab.add_document(text)
     vocab.build_vocabulary()
@@ -1013,9 +1051,31 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Create embeddings directory if it doesn't exist
+    cache_dir = 'embeddings'
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Instructions for manual download
+    manual_download_instructions = """
+    If the automatic download fails, you can manually download the GloVe embeddings:
+    
+    1. Download from: http://nlp.stanford.edu/data/glove.6B.zip
+    2. Extract the zip file
+    3. Copy the file 'glove.6B.200d.txt' to the 'embeddings' folder in your project directory
+    4. Restart the script
+    """
+    
     # Load balanced dataset (use level 2 balanced dataset for best results)
-    file_path = "balanced_level2.xlsx"
-    df = load_data(file_path)
+    try:
+        file_path = "balanced_level2.xlsx"
+        df = load_data(file_path)
+    except FileNotFoundError:
+        print(f"Error: Could not find the dataset file '{file_path}'.")
+        print("Please make sure the file exists in the current directory.")
+        return
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
     
     # Print available columns to help identify the text column
     print("\nAvailable columns in the dataset:")
@@ -1048,11 +1108,62 @@ def main():
     print("\nAnalyzing class distribution in the dataset...")
     analyze_class_distribution(df, hierarchy)
     
+    # Determine whether to use pre-trained embeddings
+    embedding_file = os.path.join(cache_dir, f'glove.6B.{embedding_dim}d.txt')
+    embeddings_exist = os.path.exists(embedding_file)
+    
+    use_pretrained = True
+    if not embeddings_exist:
+        try:
+            # Check if we can access the embeddings URL
+            test_connection = requests.head("http://nlp.stanford.edu/data/", timeout=5)
+            if test_connection.status_code != 200:
+                print("\nWarning: Could not connect to Stanford NLP server. Will run without pre-trained embeddings.")
+                print(manual_download_instructions)
+                use_pretrained = False
+        except:
+            print("\nWarning: Could not connect to Stanford NLP server. Will run without pre-trained embeddings.")
+            print(manual_download_instructions)
+            use_pretrained = False
+    
+    # Ask user if they want to use pre-trained embeddings
+    if embeddings_exist:
+        prompt = f"\nUse existing pre-trained word embeddings found in '{embedding_file}'? (yes/no, default: yes): "
+    else:
+        prompt = f"\nDownload and use pre-trained word embeddings? This requires ~800MB of data. (yes/no, default: {use_pretrained}): "
+    
+    user_choice = input(prompt)
+    if user_choice.lower() in ['n', 'no']:
+        use_pretrained = False
+    elif user_choice.lower() in ['y', 'yes'] or user_choice.strip() == '':
+        use_pretrained = True
+    
+    print(f"Running with {'pre-trained' if use_pretrained else 'random'} word embeddings.\n")
+    
     # Prepare data with oversampling for minority classes
-    (train_dataset, val_dataset, test_dataset, 
-     vocab, mlb_level1, mlb_level2, mlb_level3,
-     y_test_level1, y_test_level2, y_test_level3) = prepare_hierarchical_data(
-         df, hierarchy, review_text_column, oversample_minority=True)
+    try:
+        (train_dataset, val_dataset, test_dataset, 
+        vocab, mlb_level1, mlb_level2, mlb_level3,
+        y_test_level1, y_test_level2, y_test_level3) = prepare_hierarchical_data(
+            df, hierarchy, review_text_column, oversample_minority=True, use_pretrained=use_pretrained)
+    except Exception as e:
+        print(f"Error preparing data: {e}")
+        if use_pretrained:
+            print("\nError occurred with pre-trained embeddings. Would you like to try again without them? (yes/no): ")
+            retry_choice = input()
+            if retry_choice.lower() in ['y', 'yes']:
+                print("Retrying without pre-trained embeddings...")
+                (train_dataset, val_dataset, test_dataset, 
+                vocab, mlb_level1, mlb_level2, mlb_level3,
+                y_test_level1, y_test_level2, y_test_level3) = prepare_hierarchical_data(
+                    df, hierarchy, review_text_column, oversample_minority=True, use_pretrained=False)
+            else:
+                print("Exiting. Please try again later or follow the manual download instructions:")
+                print(manual_download_instructions)
+                return
+        else:
+            print("Exiting due to error.")
+            return
     
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -1159,13 +1270,46 @@ def load_glove_embeddings(embedding_dim=200):
         url = 'http://nlp.stanford.edu/data/glove.6B.zip'
         
         try:
-            # Download and extract
-            r = requests.get(url)
-            z = zipfile.ZipFile(io.BytesIO(r.content))
-            z.extractall(cache_dir)
-            print("GloVe embeddings downloaded successfully.")
-        except Exception as e:
+            # Download with progress feedback and timeout
+            print("This may take a few minutes. Please be patient...")
+            r = requests.get(url, stream=True, timeout=30)
+            r.raise_for_status()  # Raise exception for HTTP errors
+            
+            # Get file size if available
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            
+            # Create a temporary file to store the zip
+            zip_path = os.path.join(cache_dir, 'glove.6B.zip')
+            with open(zip_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        # Show progress
+                        if total_size > 0:
+                            percent = downloaded / total_size * 100
+                            print(f"\rDownloading: {percent:.1f}% ({downloaded} / {total_size} bytes)", end='')
+            
+            print("\nExtracting embeddings...")
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(cache_dir)
+            
+            # Remove the zip file after extraction
+            os.remove(zip_path)
+            print("GloVe embeddings downloaded and extracted successfully.")
+            
+        except requests.exceptions.Timeout:
+            print("Error: Download timed out. Please try again later or manually download the embeddings.")
+            print("You can download from: http://nlp.stanford.edu/data/glove.6B.zip")
+            print("Extract the file and place glove.6B.{}d.txt in the 'embeddings' folder.".format(embedding_dim))
+            return {}
+        except requests.exceptions.RequestException as e:
             print(f"Error downloading GloVe embeddings: {e}")
+            print("Proceeding without pre-trained embeddings.")
+            return {}
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             print("Proceeding without pre-trained embeddings.")
             return {}
     
